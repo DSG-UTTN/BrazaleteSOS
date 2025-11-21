@@ -92,13 +92,23 @@ class TwilioSMSService {
           accountSid: twilioConfig.accountSid,
         });
       }
+
+      // Detectar error de Trial Account
+      const errorCode = error.response?.data?.code;
+      const errorMessage = error.response?.data?.message || error.message || 'Error desconocido';
+      
+      if (errorCode === 21608) {
+        console.warn('⚠️ CUENTA TRIAL: El número no está verificado.');
+        console.warn('💡 Solución: Verifica el número en https://console.twilio.com/us1/develop/phone-numbers/manage/verified');
+      }
       
       return {
         messageSid: '',
         contact,
         status: 'failed',
         timestamp: Date.now(),
-        errorMessage: error.response?.data?.message || error.message || 'Error desconocido',
+        errorMessage,
+        errorCode,
       };
     }
   }

@@ -39,7 +39,16 @@ export default function SettingsScreen() {
 
     if (twilio) {
       setTwilioData(twilio);
+    } else {
+      // Cargar valores por defecto si no hay configuración guardada
+      const { TWILIO_CONFIG } = require('../config/twilio.config');
+      setTwilioData({
+        accountSid: TWILIO_CONFIG.ACCOUNT_SID,
+        authToken: TWILIO_CONFIG.AUTH_TOKEN,
+        phoneNumber: TWILIO_CONFIG.PHONE_NUMBER,
+      });
     }
+    
     if (user) {
       setUserData({
         ...user,

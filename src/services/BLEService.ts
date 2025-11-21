@@ -86,8 +86,13 @@ class BLEService {
             return;
           }
 
+          // Log de TODOS los dispositivos detectados
+          if (device?.name) {
+            console.log('📱 Dispositivo detectado:', device.name, 'ID:', device.id);
+          }
+
           if (device && device.name?.startsWith(BLE_CONSTANTS.DEVICE_NAME_PREFIX)) {
-            console.log('✅ Brazalete encontrado:', device.name);
+            console.log('✅ Brazalete encontrado:', device.name, 'RSSI:', device.rssi);
             onDeviceFound(device);
           }
         },
@@ -99,32 +104,46 @@ class BLEService {
    * Conectar a un brazalete específico
    */
   async connect(deviceId: string): Promise<void> {
-    console.log(`🔗 Conectando a dispositivo: ${deviceId}`);
+    console.log(`🔗 Intentando conectar a: ${deviceId}`);
     this.connectionStatus = 'connecting';
 
     try {
-      // Conectar al dispositivo
-      const device = await this.manager.connectToDevice(deviceId);
+      // Detener escaneo antes de conectar
+      this.manager.stopDeviceScan();
+      console.log('⏹️ Escaneo detenido');
+
+      // Conectar al dispositivo con timeout explícito
+      console.log('⏳ Conectando... (esto puede tardar unos segundos)');
+      const device = await this.manager.connectToDevice(deviceId, {
+        timeout: 10000, // 10 segundos
+      });
       this.connectedDevice = device;
+      console.log('🔗 Dispositivo conectado, descubriendo servicios...');
 
       // Descubrir servicios y características
       await device.discoverAllServicesAndCharacteristics();
+      console.log('📡 Servicios descubiertos');
       
       this.connectionStatus = 'connected';
-      console.log('✅ Conectado al brazalete');
+      console.log('✅ CONEXION EXITOSA');
 
       // Suscribirse a notificaciones
       await this.subscribeToNotifications();
 
       // Monitorear desconexión
-      device.onDisconnected(() => {
+      device.onDisconnected((error, disconnectedDevice) => {
         console.log('🔌 Brazalete desconectado');
+        if (error) {
+          console.error('Error de desconexión:', error);
+        }
         this.connectionStatus = 'disconnected';
         this.connectedDevice = null;
       });
-    } catch (error) {
-      console.error('❌ Error conectando:', error);
+    } catch (error: any) {
+      console.error('❌ Error conectando:', error.message || error);
+      console.error('Detalles:', error);
       this.connectionStatus = 'error';
+      this.connectedDevice = null;
       throw error;
     }
   }

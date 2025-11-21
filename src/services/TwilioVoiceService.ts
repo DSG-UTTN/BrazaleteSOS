@@ -93,6 +93,15 @@ class TwilioVoiceService {
           accountSid: twilioConfig.accountSid,
         });
       }
+
+      // Detectar error de Trial Account
+      const errorCode = error.response?.data?.code;
+      const errorMessage = error.response?.data?.message || error.message;
+      
+      if (errorCode === 21219) {
+        console.warn('⚠️ CUENTA TRIAL: El número no está verificado.');
+        console.warn('💡 Solución: Verifica el número en https://console.twilio.com/us1/develop/phone-numbers/manage/verified');
+      }
       
       return {
         callSid: '',
@@ -101,6 +110,8 @@ class TwilioVoiceService {
         answered: false,
         duration: 0,
         timestamp: Date.now(),
+        errorCode,
+        errorMessage,
       };
     }
   }

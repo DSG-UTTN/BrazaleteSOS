@@ -99,6 +99,8 @@ export interface CallResult {
   duration: number; // segundos
   timestamp: number;
   busy?: boolean;
+  errorCode?: number;
+  errorMessage?: string;
 }
 
 /**
@@ -110,6 +112,7 @@ export interface SMSResult {
   status: 'sent' | 'delivered' | 'failed';
   timestamp: number;
   errorMessage?: string;
+  errorCode?: number;
 }
 
 /**

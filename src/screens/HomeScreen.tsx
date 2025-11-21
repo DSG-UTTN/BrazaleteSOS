@@ -41,7 +41,21 @@ export default function HomeScreen({ navigation }: Props) {
       ]);
 
       setContacts(loadedContacts);
-      setTwilioConfig(loadedTwilio);
+      
+      // Si no hay configuración de Twilio guardada, usar valores por defecto
+      if (!loadedTwilio) {
+        const { TWILIO_CONFIG } = require('../config/twilio.config');
+        const defaultConfig: TwilioConfig = {
+          accountSid: TWILIO_CONFIG.ACCOUNT_SID,
+          authToken: TWILIO_CONFIG.AUTH_TOKEN,
+          phoneNumber: TWILIO_CONFIG.PHONE_NUMBER,
+        };
+        await StorageService.saveTwilioConfig(defaultConfig);
+        setTwilioConfig(defaultConfig);
+      } else {
+        setTwilioConfig(loadedTwilio);
+      }
+      
       setUserConfig(loadedUser);
 
       const { configured } = isAppConfigured(
@@ -98,7 +112,7 @@ export default function HomeScreen({ navigation }: Props) {
     try {
       const protocolConfig = await StorageService.getProtocolConfig();
 
-      await EmergencyProtocol.execute(
+      const alert = await EmergencyProtocol.execute(
         contacts,
         userConfig.userName,
         twilioConfig,
@@ -112,11 +126,30 @@ export default function HomeScreen({ navigation }: Props) {
       setProgressMessage('');
       setIsSending(false);
 
-      Alert.alert(
-        '✅ Alerta Enviada',
-        'El protocolo de emergencia se completó exitosamente.',
-        [{ text: 'OK' }],
-      );
+      // Verificar si hubo errores de Trial Account
+      const trialCallErrors = alert.callResults.filter(r => r.errorCode === 21219);
+      const trialSmsErrors = alert.smsResults.filter(r => r.errorCode === 21608);
+      const hasTrialErrors = trialCallErrors.length > 0 || trialSmsErrors.length > 0;
+
+      if (hasTrialErrors) {
+        Alert.alert(
+          '⚠️ Cuenta Trial de Twilio',
+          'Los números de destino no están verificados en tu cuenta Trial de Twilio.\n\n' +
+          '📋 Pasos para verificar números:\n' +
+          '1. Ve a console.twilio.com\n' +
+          '2. Ir a Phone Numbers > Manage > Verified Caller IDs\n' +
+          '3. Agrega y verifica cada número\n' +
+          '4. Vuelve a intentar\n\n' +
+          'O actualiza a una cuenta pagada para eliminar esta restricción.',
+          [{ text: 'Entendido' }]
+        );
+      } else {
+        Alert.alert(
+          '✅ Alerta Enviada',
+          'El protocolo de emergencia se completó exitosamente.',
+          [{ text: 'OK' }],
+        );
+      }
     } catch (error: any) {
       console.error('Error enviando SOS:', error);
       setProgressMessage('');

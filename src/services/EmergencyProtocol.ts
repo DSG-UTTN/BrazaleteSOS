@@ -55,33 +55,46 @@ class EmergencyProtocol {
       };
       this.currentAlert = alert;
 
-      // 3. ENVIAR SMS A TODOS INMEDIATAMENTE (en paralelo)
+      // 3. ENVIAR SMS Y LLAMADAS EN PARALELO
+      onProgress?.('🚨 Iniciando llamadas y SMS simultáneamente...');
+      
+      const promises: Promise<any>[] = [];
+
+      // Promise de SMS (si está habilitado)
       if (protocolConfig.smsEnabled) {
-        onProgress?.('📱 Enviando SMS a todos los contactos...');
-        const smsResults = await TwilioSMSService.sendBulkEmergencySMS(
+        const smsPromise = TwilioSMSService.sendBulkEmergencySMS(
           contacts,
           location,
           userName,
           twilioConfig,
-        );
-        alert.smsResults = smsResults;
-        
-        const smsSent = smsResults.filter(r => r.status === 'sent').length;
-        console.log(`✅ SMS enviados: ${smsSent}/${contacts.length}`);
-        onProgress?.(`📱 SMS enviados: ${smsSent}/${contacts.length}`, { smsResults });
+        ).then(smsResults => {
+          alert.smsResults = smsResults;
+          const smsSent = smsResults.filter(r => r.status === 'sent').length;
+          console.log(`✅ SMS enviados: ${smsSent}/${contacts.length}`);
+          onProgress?.(`📱 SMS enviados: ${smsSent}/${contacts.length}`, { smsResults });
+          return smsResults;
+        });
+        promises.push(smsPromise);
       }
 
-      // 4. LLAMADAS ESCALONADAS con detección inteligente
+      // Promise de llamadas (si está habilitado)
       if (protocolConfig.callEnabled) {
-        alert.callResults = await this.executeCallEscalation(
+        const callsPromise = this.executeCallEscalation(
           contacts,
           location,
           userName,
           twilioConfig,
           protocolConfig,
           onProgress,
-        );
+        ).then(callResults => {
+          alert.callResults = callResults;
+          return callResults;
+        });
+        promises.push(callsPromise);
       }
+
+      // Esperar a que ambos terminen
+      await Promise.all(promises);
 
       // 5. Marcar alerta como completada
       alert.status = 'completed';
