@@ -88,26 +88,38 @@ En el Monitor Serie deberías ver:
 
 ## 🔧 Configuración del Hardware
 
+### ⚡ Pin del Botón: GPIO 6
+
 ### Conexión del Botón
 
 ```
-Botón SOS:
-- Un terminal a GPIO 6
-- Otro terminal a GND
-- Usa el pull-up interno (ya configurado en código)
+┌────────────────────────────────┐
+│       ESP32-S3 Supermini       │
+│                                │
+│  [GPIO 6] ───────────┐        │
+│                      │        │
+│  [GND]   ────────────┤        │
+│                      │        │
+└──────────────────────┼────────┘
+                       │
+                   [BOTÓN SOS]
+                (Push Button)
 ```
 
-### Esquema Básico
+**Importante**:
+- ✅ Usa el pull-up interno (INPUT_PULLUP)
+- ✅ Presionado = LOW
+- ✅ No presionado = HIGH
+- ✅ NO necesitas resistencias externas
+
+### 🔵 Nombre BLE del Dispositivo
 
 ```
-ESP32-S3
-   │
-   ├─ GPIO 6 ───┐
-   │            │
-   └─ GND ──────┤
-                │
-             [BOTÓN]
+Nombre: BrazaleteSOS_001
+Prefijo de búsqueda: BrazaleteSOS
 ```
+
+**Nota**: La app busca cualquier dispositivo que empiece con "BrazaleteSOS"
 
 ## 📊 Protocolo BLE
 
@@ -115,17 +127,24 @@ ESP32-S3
 - **Service UUID**: `4fafc201-1fb5-459e-8fcc-c5c9c331914b`
 - **Characteristic UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
 
-### Formato del Mensaje JSON
+### ⚡ Formato del Mensaje (Delimitado)
 
-```json
-{
-  "user_id": "user_123",
-  "device_id": "BrazaleteSOS_001",
-  "timestamp": "1234567890",
-  "battery_level": 100,
-  "alert_type": "SOS"
-}
+**Formato compacto**: `alert_type|timestamp|battery_level`
+
 ```
+SOS|1234567890|100
+```
+
+**Ventajas**:
+- ✅ Solo ~15 bytes (vs 133 JSON)
+- ✅ 1 fragmento BLE (vs 7 JSON)
+- ✅ Transmisión instantánea
+- ✅ Sin problemas de fragmentación
+
+**Campos**:
+- `SOS`: Tipo de alerta
+- `1234567890`: Timestamp en milisegundos
+- `100`: Nivel de batería (0-100)
 
 ## 🐛 Solución de Problemas
 

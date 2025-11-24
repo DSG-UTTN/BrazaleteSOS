@@ -11,6 +11,8 @@ class BLEService {
   private connectedDevice: Device | null = null;
   private connectionStatus: BLEConnectionStatus = 'disconnected';
   private listeners: ((message: BraceletMessage) => void)[] = [];
+  private messageBuffer: string = ''; // Buffer para acumular fragmentos de JSON
+  private bufferTimeout: NodeJS.Timeout | null = null; // Timeout para limpiar buffer
 
   constructor() {
     this.manager = new BleManager();
@@ -65,11 +67,17 @@ class BLEService {
       throw new Error('Permisos BLE no concedidos');
     }
 
+    let deviceFoundAndHandled = false;
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.manager.stopDeviceScan();
-        console.log('⏱️ Timeout de escaneo');
-        this.connectionStatus = 'disconnected';
+        if (!deviceFoundAndHandled) {
+          this.manager.stopDeviceScan();
+          console.log('⏱️ Timeout de escaneo');
+          if (this.connectionStatus === 'scanning') {
+            this.connectionStatus = 'disconnected';
+          }
+        }
         resolve();
       }, timeoutMs);
 
@@ -92,8 +100,19 @@ class BLEService {
           }
 
           if (device && device.name?.startsWith(BLE_CONSTANTS.DEVICE_NAME_PREFIX)) {
-            console.log('✅ Brazalete encontrado:', device.name, 'RSSI:', device.rssi);
-            onDeviceFound(device);
+            if (!deviceFoundAndHandled) {
+              deviceFoundAndHandled = true;
+              console.log('✅ Brazalete encontrado:', device.name, 'RSSI:', device.rssi);
+              
+              // Detener escaneo inmediatamente
+              clearTimeout(timeout);
+              this.manager.stopDeviceScan();
+              console.log('⏹️ Escaneo detenido (brazalete encontrado)');
+              
+              // Llamar al callback
+              onDeviceFound(device);
+              resolve();
+            }
           }
         },
       );
@@ -115,7 +134,8 @@ class BLEService {
       // Conectar al dispositivo con timeout explícito
       console.log('⏳ Conectando... (esto puede tardar unos segundos)');
       const device = await this.manager.connectToDevice(deviceId, {
-        timeout: 10000, // 10 segundos
+        timeout: 15000, // 15 segundos
+        requestMTU: 512, // Solicitar MTU más grande para menos fragmentación
       });
       this.connectedDevice = device;
       console.log('🔗 Dispositivo conectado, descubriendo servicios...');
@@ -123,6 +143,15 @@ class BLEService {
       // Descubrir servicios y características
       await device.discoverAllServicesAndCharacteristics();
       console.log('📡 Servicios descubiertos');
+
+      // Solicitar MTU más grande
+      try {
+        const mtuResult = await device.requestMTU(512);
+        const mtuValue = typeof mtuResult === 'object' ? (mtuResult as any).mtu || 'desconocido' : mtuResult;
+        console.log(`📏 MTU negociado: ${mtuValue} bytes`);
+      } catch (mtuError) {
+        console.log('⚠️ No se pudo negociar MTU, usando predeterminado');
+      }
       
       this.connectionStatus = 'connected';
       console.log('✅ CONEXION EXITOSA');
@@ -138,6 +167,13 @@ class BLEService {
         }
         this.connectionStatus = 'disconnected';
         this.connectedDevice = null;
+        this.messageBuffer = ''; // Limpiar buffer al desconectar
+        
+        // Intentar reconectar automáticamente
+        console.log('🔄 Intentando reconectar en 3 segundos...');
+        setTimeout(() => {
+          this.reconnect(deviceId);
+        }, 3000);
       });
     } catch (error: any) {
       console.error('❌ Error conectando:', error.message || error);
@@ -157,6 +193,9 @@ class BLEService {
     }
 
     try {
+      // Resetear buffer al suscribirse
+      this.messageBuffer = '';
+
       this.connectedDevice.monitorCharacteristicForService(
         BLE_CONSTANTS.SERVICE_UUID,
         BLE_CONSTANTS.CHARACTERISTIC_UUID,
@@ -168,16 +207,67 @@ class BLEService {
 
           if (characteristic?.value) {
             try {
-              // Decodificar mensaje (base64 -> string -> JSON)
+              // Decodificar mensaje (base64 -> string)
               const decoded = base64.decode(characteristic.value);
-              const message: BraceletMessage = JSON.parse(decoded);
+              console.log('📦 Mensaje recibido:', decoded);
+
+              // Acumular en buffer
+              this.messageBuffer += decoded;
+
+              // Cancelar timeout anterior si existe
+              if (this.bufferTimeout) {
+                clearTimeout(this.bufferTimeout);
+              }
+
+              // Verificar si el mensaje está completo (termina sin fragmentar)
+              // Para formato delimitado: "SOS|timestamp|battery"
+              const trimmed = this.messageBuffer.trim();
               
-              console.log('📨 Mensaje del brazalete:', message);
-              
-              // Notificar a los listeners
-              this.listeners.forEach(listener => listener(message));
+              // Si tiene el formato esperado (3 partes separadas por |)
+              if (trimmed.includes('|')) {
+                const parts = trimmed.split('|');
+                
+                if (parts.length === 3) {
+                  // Mensaje completo recibido
+                  const message: BraceletMessage = {
+                    user_id: 'user_123',
+                    device_id: 'BrazaleteSOS_001',
+                    timestamp: parts[1],
+                    battery_level: parseInt(parts[2]),
+                    alert_type: parts[0],
+                  };
+                  
+                  console.log('✅ Mensaje parseado:', message);
+                  
+                  // Notificar a los listeners
+                  this.listeners.forEach(listener => listener(message));
+                  
+                  // Limpiar buffer después de procesar
+                  this.messageBuffer = '';
+                  this.bufferTimeout = null;
+                } else {
+                  // Mensaje incompleto, esperar más datos
+                  console.log('⏳ Mensaje incompleto, esperando más datos...');
+                  this.bufferTimeout = setTimeout(() => {
+                    console.warn('⏱️ Timeout de buffer, limpiando datos incompletos');
+                    console.warn('Buffer descartado:', this.messageBuffer);
+                    this.messageBuffer = '';
+                    this.bufferTimeout = null;
+                  }, 2000); // 2 segundos (menos tiempo porque es más rápido)
+                }
+              } else {
+                // Sin delimitador, esperar más datos
+                console.log('⏳ Esperando delimitadores...');
+                this.bufferTimeout = setTimeout(() => {
+                  console.warn('⏱️ Timeout de buffer, limpiando datos incompletos');
+                  console.warn('Buffer descartado:', this.messageBuffer);
+                  this.messageBuffer = '';
+                  this.bufferTimeout = null;
+                }, 2000);
+              }
             } catch (e) {
               console.error('❌ Error parseando mensaje:', e);
+              this.messageBuffer = ''; // Limpiar buffer en caso de error crítico
             }
           }
         },
@@ -187,6 +277,27 @@ class BLEService {
     } catch (error) {
       console.error('❌ Error suscribiéndose a notificaciones:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Reconectar automáticamente
+   */
+  private async reconnect(deviceId: string): Promise<void> {
+    if (this.connectionStatus === 'connected') {
+      console.log('⏸️ Ya reconectado, cancelando intento');
+      return;
+    }
+
+    console.log('🔄 Reintentando conexión...');
+    try {
+      await this.connect(deviceId);
+      console.log('✅ Reconexión exitosa');
+    } catch (error) {
+      console.error('❌ Error en reconexión, reintentando en 5 segundos...');
+      setTimeout(() => {
+        this.reconnect(deviceId);
+      }, 5000);
     }
   }
 

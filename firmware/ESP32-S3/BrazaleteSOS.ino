@@ -13,7 +13,9 @@ const int BUTTON_PIN = 6;
 
 // Variables BLE
 BLECharacteristic *pCharacteristic;
+BLEServer *pServer;
 bool deviceConnected = false;
+bool oldDeviceConnected = false;
 
 // Control del boton
 int lastButtonState = HIGH;
@@ -41,7 +43,11 @@ void setup() {
   
   // Inicializar BLE
   BLEDevice::init(DEVICE_NAME);
-  BLEServer *pServer = BLEDevice::createServer();
+  
+  // Configurar MTU más grande para menos fragmentación
+  BLEDevice::setMTU(512);
+  
+  pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
   
   BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -49,7 +55,8 @@ void setup() {
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
     BLECharacteristic::PROPERTY_READ |
-    BLECharacteristic::PROPERTY_NOTIFY
+    BLECharacteristic::PROPERTY_NOTIFY |
+    BLECharacteristic::PROPERTY_INDICATE
   );
   
   pCharacteristic->addDescriptor(new BLE2902());
@@ -57,12 +64,30 @@ void setup() {
   
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // Ayuda con problemas de conexión de iOS
+  pAdvertising->setMinPreferred(0x12);
   pAdvertising->start();
   
   Serial.println("BLE iniciado - Esperando conexion...");
+  Serial.print("MTU configurado a: 512 bytes\n");
 }
 
 void loop() {
+  // Manejar reconexión
+  if (!deviceConnected && oldDeviceConnected) {
+    delay(500); // Dar tiempo al stack BLE para prepararse
+    pServer->startAdvertising(); // Reiniciar advertising
+    Serial.println("Esperando reconexion...");
+    oldDeviceConnected = deviceConnected;
+  }
+  
+  // Manejar nueva conexión
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+    Serial.println("Cliente conectado!");
+  }
+  
   int buttonState = digitalRead(BUTTON_PIN);
   
   // Boton presionado (LOW porque usa pull-up)
@@ -74,15 +99,18 @@ void loop() {
       Serial.println("BOTON PRESIONADO");
       
       if (deviceConnected) {
-        // Enviar mensaje JSON simple
-        String mensaje = "{\"user_id\":\"user_123\",\"device_id\":\"BrazaleteSOS_001\",\"timestamp\":\"" + 
-                        String(millis()) + "\",\"battery_level\":100,\"alert_type\":\"SOS\"}";
+        // Formato delimitado: alert_type|timestamp|battery_level
+        String mensaje = "SOS|" + String(millis()) + "|100";
         
         pCharacteristic->setValue(mensaje.c_str());
         pCharacteristic->notify();
         
         Serial.println("ALERTA ENVIADA");
         Serial.println(mensaje);
+        Serial.print("Tamaño: ");
+        Serial.print(mensaje.length());
+        Serial.println(" bytes (1 fragmento BLE)");
+        
         lastAlertTime = millis();
       } else {
         Serial.println("NO CONECTADO - No se puede enviar");

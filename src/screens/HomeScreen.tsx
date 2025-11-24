@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { EmergencyProtocol, StorageService, GeolocationService } from '../services';
-import type { EmergencyContact, TwilioConfig, UserConfig } from '../types';
+import BLEService from '../services/BLEService';
+import type { EmergencyContact, TwilioConfig, UserConfig, BraceletMessage } from '../types';
 import { COLORS, SPACING, FONT_SIZES } from '../utils/constants';
 import { isAppConfigured } from '../utils/validators';
 
@@ -27,9 +28,20 @@ export default function HomeScreen({ navigation }: Props) {
   const [twilioConfig, setTwilioConfig] = useState<TwilioConfig | null>(null);
   const [userConfig, setUserConfig] = useState<UserConfig | null>(null);
   const [progressMessage, setProgressMessage] = useState('');
+  const [bleStatus, setBleStatus] = useState<string>('disconnected');
 
   useEffect(() => {
     loadConfiguration();
+    connectToBracelet();
+    
+    // Cleanup al desmontar
+    return () => {
+      // Limpiar intervalo de monitoreo
+      if ((global as any).bleConnectionCheckInterval) {
+        clearInterval((global as any).bleConnectionCheckInterval);
+      }
+      BLEService.disconnect();
+    };
   }, []);
 
   const loadConfiguration = async () => {
@@ -43,6 +55,7 @@ export default function HomeScreen({ navigation }: Props) {
       setContacts(loadedContacts);
       
       // Si no hay configuración de Twilio guardada, usar valores por defecto
+      let finalTwilioConfig = loadedTwilio;
       if (!loadedTwilio) {
         const { TWILIO_CONFIG } = require('../config/twilio.config');
         const defaultConfig: TwilioConfig = {
@@ -51,19 +64,27 @@ export default function HomeScreen({ navigation }: Props) {
           phoneNumber: TWILIO_CONFIG.PHONE_NUMBER,
         };
         await StorageService.saveTwilioConfig(defaultConfig);
-        setTwilioConfig(defaultConfig);
-      } else {
-        setTwilioConfig(loadedTwilio);
+        finalTwilioConfig = defaultConfig;
+        console.log('✅ Configuración de Twilio cargada desde valores por defecto');
       }
       
+      setTwilioConfig(finalTwilioConfig);
       setUserConfig(loadedUser);
 
+      // Usar finalTwilioConfig en lugar de loadedTwilio para la validación
       const { configured } = isAppConfigured(
-        loadedTwilio || undefined,
+        finalTwilioConfig || undefined,
         loadedUser || undefined,
         loadedContacts,
       );
       setIsReady(configured);
+
+      console.log('📋 Estado de configuración:', {
+        twilio: !!finalTwilioConfig,
+        user: !!loadedUser,
+        contacts: loadedContacts.length,
+        ready: configured,
+      });
 
       if (!configured) {
         Alert.alert(
@@ -77,6 +98,81 @@ export default function HomeScreen({ navigation }: Props) {
       }
     } catch (error) {
       console.error('Error cargando configuración:', error);
+    }
+  };
+
+  const connectToBracelet = async () => {
+    try {
+      // Si ya está conectado, no hacer nada
+      if (BLEService.isConnected()) {
+        setBleStatus('Conectado ✓');
+        console.log('✅ Ya conectado al brazalete');
+        return;
+      }
+
+      setBleStatus('Buscando brazalete...');
+      console.log('🔍 Iniciando búsqueda de brazalete BLE...');
+
+      // Escanear por 15 segundos (ahora se detiene automáticamente al encontrar)
+      await BLEService.scanForBracelet(
+        async (device) => {
+          console.log('✅ Brazalete encontrado, conectando...');
+          setBleStatus('Conectando...');
+          
+          try {
+            // Conectar al dispositivo
+            await BLEService.connect(device.id);
+            setBleStatus('Conectado ✓');
+            console.log('✅ Brazalete conectado exitosamente');
+
+            // Escuchar mensajes del brazalete
+            BLEService.addMessageListener(handleBraceletMessage);
+            
+            // Monitorear estado de conexión cada 5 segundos
+            const connectionCheckInterval = setInterval(() => {
+              if (BLEService.isConnected()) {
+                setBleStatus('Conectado ✓');
+              } else {
+                setBleStatus('Reconectando...');
+              }
+            }, 5000);
+            
+            // Guardar intervalo para limpieza
+            (global as any).bleConnectionCheckInterval = connectionCheckInterval;
+          } catch (error) {
+            console.error('❌ Error al conectar:', error);
+            setBleStatus('Error al conectar');
+            // Reintentar después de 5 segundos
+            setTimeout(() => connectToBracelet(), 5000);
+          }
+        },
+        15000, // 15 segundos
+      );
+
+      // Si termina el escaneo sin encontrar nada
+      if (!BLEService.isConnected()) {
+        setBleStatus('No encontrado');
+        console.log('⚠️ No se encontró el brazalete, reintentando en 10 segundos...');
+        // Reintentar automáticamente
+        setTimeout(() => connectToBracelet(), 10000);
+      }
+    } catch (error) {
+      console.error('❌ Error en búsqueda BLE:', error);
+      setBleStatus('Error BLE');
+      // Reintentar después de 10 segundos
+      setTimeout(() => connectToBracelet(), 10000);
+    }
+  };
+
+  const handleBraceletMessage = (message: BraceletMessage) => {
+    console.log('📨 Mensaje recibido del brazalete:', message);
+    
+    if (message.alert_type === 'SOS') {
+      console.log('🚨 ALERTA SOS RECIBIDA DEL BRAZALETE!');
+      console.log('🚨 Enviando alertas automáticamente...');
+      
+      // Enviar alertas inmediatamente sin confirmación
+      sendSOSAlert();
     }
   };
 
@@ -101,21 +197,51 @@ export default function HomeScreen({ navigation }: Props) {
   };
 
   const sendSOSAlert = async () => {
-    if (!twilioConfig || !userConfig || contacts.length === 0) {
-      Alert.alert('Error', 'Configuración incompleta');
-      return;
-    }
-
+    console.log('🚨 Enviando alerta SOS...');
+    
     setIsSending(true);
-    setProgressMessage('Iniciando protocolo de emergencia...');
+    setProgressMessage('Cargando configuración...');
 
     try {
+      // Recargar configuración en tiempo real por si acaso
+      const [currentContacts, currentTwilio, currentUser] = await Promise.all([
+        StorageService.getContacts(),
+        StorageService.getTwilioConfig(),
+        StorageService.getUserConfig(),
+      ]);
+
+      console.log('📋 Configuración actual:', {
+        twilio: !!currentTwilio,
+        user: !!currentUser,
+        contacts: currentContacts.length,
+      });
+
+      // Validar configuración
+      if (!currentTwilio) {
+        setIsSending(false);
+        setProgressMessage('');
+        Alert.alert('Error', 'Falta configurar Twilio en Ajustes');
+        return;
+      }
+      
+      if (currentContacts.length === 0) {
+        setIsSending(false);
+        setProgressMessage('');
+        Alert.alert('Error', 'Debes agregar al menos 1 contacto de emergencia');
+        return;
+      }
+      
+      // Si no hay nombre de usuario, usar uno por defecto
+      const userName = currentUser?.userName || 'Usuario BrazaleteSOS';
+
+      setProgressMessage('Iniciando protocolo de emergencia...');
+
       const protocolConfig = await StorageService.getProtocolConfig();
 
       const alert = await EmergencyProtocol.execute(
-        contacts,
-        userConfig.userName,
-        twilioConfig,
+        currentContacts,
+        userName,
+        currentTwilio,
         protocolConfig,
         (message, data) => {
           setProgressMessage(message);
@@ -177,6 +303,15 @@ export default function HomeScreen({ navigation }: Props) {
         {/* Estado de configuración */}
         <View style={styles.statusCard}>
           <Text style={styles.statusTitle}>Estado del Sistema</Text>
+          <View style={styles.statusRow}>
+            <Text style={styles.statusLabel}>Brazalete BLE:</Text>
+            <Text style={[
+              styles.statusValue,
+              bleStatus === 'Conectado ✓' ? styles.statusReady : styles.statusNotReady
+            ]}>
+              {bleStatus}
+            </Text>
+          </View>
           <View style={styles.statusRow}>
             <Text style={styles.statusLabel}>Configuración:</Text>
             <Text style={[styles.statusValue, isReady ? styles.statusReady : styles.statusNotReady]}>
@@ -242,14 +377,22 @@ export default function HomeScreen({ navigation }: Props) {
             <Text style={styles.menuButtonIcon}>📍</Text>
             <Text style={styles.menuButtonText}>Probar GPS</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.menuButton}
+            onPress={connectToBracelet}>
+            <Text style={styles.menuButtonIcon}>🔗</Text>
+            <Text style={styles.menuButtonText}>Conectar BLE</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Información */}
         <View style={styles.infoCard}>
           <Text style={styles.infoTitle}>ℹ️ Información</Text>
           <Text style={styles.infoText}>
-            Presiona el botón SOS en caso de emergencia. Se enviará tu ubicación GPS y se 
-            llamará automáticamente a todos tus contactos de emergencia.
+            El brazalete se conecta automáticamente al abrir la app. Presiona el botón físico 
+            del brazalete para enviar una alerta SOS automática, o usa el botón de la app 
+            para enviar manualmente.
           </Text>
         </View>
       </View>
